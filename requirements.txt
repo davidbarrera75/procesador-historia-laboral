@@ -1,0 +1,8 @@
+
+Flask
+flask-cors
+pdfplumber
+pandas
+openpyxl
+gunicorn
+
