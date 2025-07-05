@@ -7,7 +7,6 @@ import io
 import json
 from datetime import datetime
 import os
-import unicodedata
 
 app = Flask(__name__)
 CORS(app)
@@ -176,11 +175,6 @@ HTML_TEMPLATE = '''
             color: #d70015;
         }
 
-        .message.info {
-            background-color: #d4e4ff;
-            color: #0051d7;
-        }
-
         .download-buttons {
             display: none;
             margin-top: 24px;
@@ -195,20 +189,6 @@ HTML_TEMPLATE = '''
             font-size: 14px;
             color: #1d1d1f;
             display: none;
-        }
-
-        .debug-info {
-            margin-top: 16px;
-            padding: 12px;
-            background-color: #f0f0f0;
-            border-radius: 8px;
-            font-size: 12px;
-            color: #666;
-            max-height: 200px;
-            overflow-y: auto;
-            display: none;
-            white-space: pre-wrap;
-            font-family: monospace;
         }
     </style>
 </head>
@@ -234,7 +214,6 @@ HTML_TEMPLATE = '''
         </div>
 
         <div class="message" id="message"></div>
-        <div class="debug-info" id="debugInfo"></div>
 
         <div class="download-buttons" id="downloadButtons">
             <button class="button" id="downloadExcel">Exportar Excel</button>
@@ -249,7 +228,6 @@ HTML_TEMPLATE = '''
         const message = document.getElementById('message');
         const downloadButtons = document.getElementById('downloadButtons');
         const fileInfo = document.getElementById('fileInfo');
-        const debugInfo = document.getElementById('debugInfo');
         const downloadExcel = document.getElementById('downloadExcel');
         const downloadJson = document.getElementById('downloadJson');
 
@@ -296,7 +274,7 @@ HTML_TEMPLATE = '''
             }
 
             fileInfo.style.display = 'block';
-            fileInfo.textContent = `Archivo seleccionado: ${file.name} (${formatFileSize(file.size)})`;
+            fileInfo.textContent = 'Archivo seleccionado: ' + file.name + ' (' + formatFileSize(file.size) + ')';
 
             uploadFile(file);
         }
@@ -315,7 +293,6 @@ HTML_TEMPLATE = '''
 
             loading.style.display = 'block';
             message.style.display = 'none';
-            debugInfo.style.display = 'none';
             downloadButtons.style.display = 'none';
 
             try {
@@ -328,14 +305,10 @@ HTML_TEMPLATE = '''
 
                 if (response.ok && result.success) {
                     processedData = result.data;
-                    showMessage(`Archivo procesado exitosamente. Se encontraron ${result.data.length} registros.`, 'success');
+                    showMessage('Archivo procesado exitosamente. Se encontraron ' + result.data.length + ' registros.', 'success');
                     downloadButtons.style.display = 'block';
                 } else {
                     showMessage(result.error || 'Error al procesar el archivo', 'error');
-                    if (result.debug_info) {
-                        debugInfo.style.display = 'block';
-                        debugInfo.textContent = 'Información de debug:\n' + result.debug_info;
-                    }
                 }
             } catch (error) {
                 showMessage('Error de conexión con el servidor', 'error');
@@ -347,7 +320,7 @@ HTML_TEMPLATE = '''
 
         function showMessage(text, type) {
             message.textContent = text;
-            message.className = `message ${type}`;
+            message.className = 'message ' + type;
             message.style.display = 'block';
         }
 
@@ -404,74 +377,38 @@ HTML_TEMPLATE = '''
 def index():
     return render_template_string(HTML_TEMPLATE)
 
-def normalize_text(text):
-    """
-    Normaliza el texto para hacer búsquedas más flexibles
-    """
-    # Eliminar tildes
-    text = ''.join(c for c in unicodedata.normalize('NFD', text)
-                   if unicodedata.category(c) != 'Mn')
-    # Convertir a minúsculas
-    text = text.lower()
-    # Eliminar espacios múltiples
-    text = ' '.join(text.split())
-    return text
-
 def extract_labor_history_data(pdf_path):
     """
-    Extrae datos de historia laboral del PDF con búsqueda flexible
+    Extrae datos de historia laboral del PDF
     """
     data = []
-    debug_info = []
-    
-    # Palabras clave para buscar (normalizadas)
-    keywords = [
-        "historia laboral regimen de ahorro individual con solidaridad",
-        "historia laboral regimen de ahorro individual",
-        "historia laboral",
-        "regimen de ahorro individual",
-        "ahorro individual con solidaridad"
-    ]
     
     try:
         with pdfplumber.open(pdf_path) as pdf:
             found_section = False
             
-            debug_info.append(f"Total de páginas en el PDF: {len(pdf.pages)}")
-            
             for page_num, page in enumerate(pdf.pages):
                 text = page.extract_text()
                 
                 if not text:
-                    debug_info.append(f"Página {page_num + 1}: Sin texto extraíble")
                     continue
                 
-                # Normalizar el texto de la página
-                normalized_text = normalize_text(text)
-                
-                # Log primeros 500 caracteres de cada página
-                preview = text[:500].replace('\n', ' ')
-                debug_info.append(f"\nPágina {page_num + 1} - Vista previa: {preview}...")
-                
-                # Buscar cualquiera de las palabras clave
-                for keyword in keywords:
-                    if keyword in normalized_text:
-                        found_section = True
-                        debug_info.append(f"¡Sección encontrada en página {page_num + 1} con palabra clave: '{keyword}'!")
-                        break
+                # Buscar la sección de diferentes formas
+                text_lower = text.lower()
+                if any(keyword in text_lower for keyword in [
+                    "historia laboral",
+                    "regimen de ahorro individual",
+                    "ahorro individual con solidaridad",
+                    "régimen de ahorro"
+                ]):
+                    found_section = True
                 
                 if found_section:
-                    # Intentar extraer tablas
                     tables = page.extract_tables()
                     
-                    if tables:
-                        debug_info.append(f"Página {page_num + 1}: {len(tables)} tabla(s) encontrada(s)")
-                    
-                    for table_idx, table in enumerate(tables):
+                    for table in tables:
                         if not table:
                             continue
-                        
-                        debug_info.append(f"Tabla {table_idx + 1}: {len(table)} filas")
                         
                         header_row = None
                         periodo_idx = None
@@ -479,22 +416,14 @@ def extract_labor_history_data(pdf_path):
                         
                         for i, row in enumerate(table):
                             if row and any(row):
-                                # Debug: mostrar primeras filas
-                                if i < 3:
-                                    debug_info.append(f"  Fila {i}: {row}")
-                                
                                 for j, cell in enumerate(row):
                                     if cell:
-                                        cell_text = str(cell).strip()
-                                        cell_normalized = normalize_text(cell_text)
-                                        
-                                        if "periodo" in cell_normalized:
+                                        cell_text = str(cell).strip().lower()
+                                        if "periodo" in cell_text:
                                             periodo_idx = j
                                             header_row = i
-                                            debug_info.append(f"  Columna 'Periodo' encontrada en posición {j}")
-                                        elif any(term in cell_normalized for term in ["salario base", "cotizacion", "salario"]):
+                                        elif any(term in cell_text for term in ["salario", "cotizacion", "base"]):
                                             salario_idx = j
-                                            debug_info.append(f"  Columna 'Salario' encontrada en posición {j}")
                                 
                                 if periodo_idx is not None and salario_idx is not None and i > header_row:
                                     periodo = row[periodo_idx] if periodo_idx < len(row) else None
@@ -521,24 +450,21 @@ def extract_labor_history_data(pdf_path):
                                                     'salario': salario_num
                                                 })
                     
-                    # Si no encontramos tablas, intentar con expresiones regulares
+                    # Si no hay tablas, intentar con regex
                     if not tables or not data:
-                        debug_info.append(f"Página {page_num + 1}: Intentando extracción con regex")
                         lines = text.split('\n')
-                        
                         for line in lines:
-                            # Buscar patrón: YYYYMM seguido de un monto
-                            matches = re.findall(r'(\d{6})\s+.*?\$?\s*([\d,\.]+)', line)
-                            for match in matches:
-                                periodo = match[0]
-                                salario = match[1]
+                            match = re.search(r'(\d{6})\s+.*?\$?\s*([\d,\.]+)', line)
+                            if match:
+                                periodo = match.group(1)
+                                salario = match.group(2)
                                 
                                 if len(periodo) == 6:
                                     año = periodo[:4]
                                     mes = periodo[4:6]
                                     
                                     salario_clean = salario.replace(',', '').replace('.', '')
-                                    if salario_clean.isdigit() and len(salario_clean) > 2:
+                                    if salario_clean.isdigit():
                                         salario_num = int(salario_clean)
                                         
                                         data.append({
@@ -546,22 +472,11 @@ def extract_labor_history_data(pdf_path):
                                             'mes': int(mes),
                                             'salario': salario_num
                                         })
-                                        debug_info.append(f"  Registro encontrado: {año}/{mes} - ${salario_num}")
         
-        debug_text = '\n'.join(debug_info)
-        
-        if not found_section:
-            debug_text += "\n\nNo se encontró ninguna sección relacionada con historia laboral."
-            debug_text += "\nPalabras clave buscadas:"
-            for kw in keywords:
-                debug_text += f"\n  - {kw}"
-        
-        return data, None, debug_text
+        return data, None
     
     except Exception as e:
-        error_msg = str(e)
-        debug_text = '\n'.join(debug_info) + f"\n\nError: {error_msg}"
-        return None, error_msg, debug_text
+        return None, str(e)
 
 def create_excel(data):
     """
@@ -600,40 +515,30 @@ def upload_file():
         return jsonify({'success': False, 'error': 'El archivo debe ser un PDF'}), 400
     
     try:
-        temp_path = f'temp_{datetime.now().timestamp()}.pdf'
+        temp_path = 'temp_' + str(datetime.now().timestamp()) + '.pdf'
         file.save(temp_path)
         
-        data, error, debug_info = extract_labor_history_data(temp_path)
+        data, error = extract_labor_history_data(temp_path)
         
         os.remove(temp_path)
         
         if error:
-            return jsonify({
-                'success': False, 
-                'error': f'Error al procesar el PDF: {error}',
-                'debug_info': debug_info
-            }), 500
+            return jsonify({'success': False, 'error': 'Error al procesar el PDF: ' + error}), 500
         
         if not data:
             return jsonify({
                 'success': False, 
-                'error': 'No se encontraron datos válidos. Revise la información de debug.',
-                'debug_info': debug_info
+                'error': 'No se encontraron datos en la sección esperada. Verifique que el PDF contenga información de Historia Laboral.'
             }), 404
         
         return jsonify({
             'success': True,
             'data': data,
-            'message': f'Se procesaron {len(data)} registros exitosamente',
-            'debug_info': debug_info if len(data) < 10 else None  # Solo mostrar debug si hay pocos datos
+            'message': 'Se procesaron ' + str(len(data)) + ' registros exitosamente'
         })
     
     except Exception as e:
-        return jsonify({
-            'success': False, 
-            'error': str(e),
-            'debug_info': 'Error crítico al procesar el archivo'
-        }), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/download/excel', methods=['POST'])
 def download_excel():
@@ -660,6 +565,5 @@ def health_check():
     return jsonify({'status': 'ok'})
 
 if __name__ == '__main__':
-    # Para producción
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
