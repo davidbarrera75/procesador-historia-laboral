@@ -500,62 +500,77 @@ def extract_labor_history_data(pdf_path):
     """Extrae todos los datos de historia laboral del PDF"""
     
     all_records = []
+    pages_processed = 0
     
     try:
         with pdfplumber.open(pdf_path) as pdf:
             # Procesar cada página
-            for page in pdf.pages:
-                # Buscar en tablas
-                for table in page.tables:
-                    if not table or not table['data']:
-                        continue
-                    
-                    # Buscar índices de columnas
-                    periodo_idx = None
-                    salario_idx = None
-                    
-                    for i, header in enumerate(table['headers']):
-                        if header:
-                            header_str = str(header).lower()
-                            if 'periodo' in header_str or 'período' in header_str:
-                                periodo_idx = i
-                            elif 'salario' in header_str or 'cotizaci' in header_str or 'base' in header_str:
-                                salario_idx = i
-                    
-                    if periodo_idx is not None and salario_idx is not None:
-                        # Procesar filas
-                        for row in table['data']:
-                            if len(row) > max(periodo_idx, salario_idx):
-                                # Verificar si los datos están en una celda con saltos de línea
-                                periodo_cell = str(row[periodo_idx]) if row[periodo_idx] else ""
-                                salario_cell = str(row[salario_idx]) if row[salario_idx] else ""
-                                
-                                if '\n' in periodo_cell or '\n' in salario_cell:
-                                    # Datos con saltos de línea
-                                    periodos = periodo_cell.split('\n')
-                                    salarios = salario_cell.split('\n')
-                                    
-                                    for i in range(min(len(periodos), len(salarios))):
-                                        record = process_record(periodos[i].strip(), salarios[i].strip())
-                                        if record:
-                                            all_records.append(record)
-                                else:
-                                    # Una fila por registro
-                                    record = process_record(periodo_cell.strip(), salario_cell.strip())
-                                    if record:
-                                        all_records.append(record)
+            for page_num, page in enumerate(pdf.pages):
+                pages_processed += 1
                 
-                # También buscar en el texto
-                text = page.extract_text()
-                if text:
-                    # Buscar patrones de período y salario
-                    lines = text.split('\n')
-                    for line in lines:
-                        match = re.search(r'(\d{6})\s+.*?\$\s*([\d,\.]+)', line)
-                        if match:
-                            record = process_record(match.group(1), '$' + match.group(2))
-                            if record:
-                                all_records.append(record)
+                try:
+                    # Buscar en tablas
+                    tables = page.extract_tables()
+                    if tables:
+                        for table in tables:
+                            if not table or len(table) == 0:
+                                continue
+                            
+                            # La primera fila generalmente son los headers
+                            headers = table[0] if len(table) > 0 else []
+                            data_rows = table[1:] if len(table) > 1 else []
+                            
+                            # Buscar índices de columnas
+                            periodo_idx = None
+                            salario_idx = None
+                            
+                            for i, header in enumerate(headers):
+                                if header:
+                                    header_str = str(header).lower()
+                                    if 'periodo' in header_str or 'período' in header_str:
+                                        periodo_idx = i
+                                    elif 'salario' in header_str or 'cotizaci' in header_str or 'base' in header_str:
+                                        salario_idx = i
+                            
+                            if periodo_idx is not None and salario_idx is not None:
+                                # Procesar filas de datos
+                                for row in data_rows:
+                                    if len(row) > max(periodo_idx, salario_idx):
+                                        # Verificar si los datos están en una celda con saltos de línea
+                                        periodo_cell = str(row[periodo_idx]) if row[periodo_idx] else ""
+                                        salario_cell = str(row[salario_idx]) if row[salario_idx] else ""
+                                        
+                                        if '\n' in periodo_cell or '\n' in salario_cell:
+                                            # Datos con saltos de línea
+                                            periodos = periodo_cell.split('\n')
+                                            salarios = salario_cell.split('\n')
+                                            
+                                            for i in range(min(len(periodos), len(salarios))):
+                                                record = process_record(periodos[i].strip(), salarios[i].strip())
+                                                if record:
+                                                    all_records.append(record)
+                                        else:
+                                            # Una fila por registro
+                                            record = process_record(periodo_cell.strip(), salario_cell.strip())
+                                            if record:
+                                                all_records.append(record)
+                    
+                    # También buscar en el texto
+                    text = page.extract_text()
+                    if text:
+                        # Buscar patrones de período y salario
+                        lines = text.split('\n')
+                        for line in lines:
+                            match = re.search(r'(\d{6})\s+.*?\$\s*([\d,\.]+)', line)
+                            if match:
+                                record = process_record(match.group(1), '$' + match.group(2))
+                                if record:
+                                    all_records.append(record)
+                
+                except Exception as e:
+                    # Continuar con la siguiente página si hay error
+                    app.logger.warning(f"Error procesando página {page_num + 1}: {str(e)}")
+                    continue
         
         # Eliminar duplicados
         unique_records = []
@@ -568,9 +583,12 @@ def extract_labor_history_data(pdf_path):
         # Ordenar por período
         unique_records.sort(key=lambda x: x['periodo'])
         
+        app.logger.info(f"Páginas procesadas: {pages_processed}, Registros encontrados: {len(unique_records)}")
+        
         return unique_records, None
     
     except Exception as e:
+        app.logger.error(f"Error al procesar PDF: {str(e)}")
         return None, str(e)
 
 def process_record(periodo, salario):
@@ -650,7 +668,11 @@ def process_pdf():
         # Extraer datos
         data, error = extract_labor_history_data(temp_path)
         
-        os.remove(temp_path)
+        # Limpiar archivo temporal
+        try:
+            os.remove(temp_path)
+        except:
+            pass
         
         if error:
             return jsonify({'success': False, 'error': 'Error al procesar el PDF: ' + error}), 500
@@ -658,7 +680,7 @@ def process_pdf():
         if not data:
             return jsonify({
                 'success': False, 
-                'error': 'No se encontraron datos de historia laboral en el PDF'
+                'error': 'No se encontraron datos de historia laboral en el PDF. Verifique que el PDF contenga una tabla con columnas "Periodo" y "Salario base de cotización".'
             }), 404
         
         # Calcular resumen
@@ -674,7 +696,7 @@ def process_pdf():
                 <strong>Total de meses:</strong> {len(data)}<br>
                 <strong>Salario mínimo:</strong> ${df['salario'].min():,}<br>
                 <strong>Salario máximo:</strong> ${df['salario'].max():,}<br>
-                <strong>Páginas procesadas:</strong> Todas
+                <strong>Incremento total:</strong> {((df['salario'].iloc[-1] - df['salario'].iloc[0]) / df['salario'].iloc[0] * 100):.1f}%
             """
         }
         
@@ -686,7 +708,8 @@ def process_pdf():
         })
     
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        app.logger.error(f"Error inesperado: {str(e)}")
+        return jsonify({'success': False, 'error': 'Error inesperado al procesar el archivo. Por favor, intente nuevamente.'}), 500
 
 @app.route('/download/excel', methods=['POST'])
 def download_excel():
