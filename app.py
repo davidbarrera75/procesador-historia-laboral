@@ -1,7 +1,10 @@
 from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
 import pdfplumber
+import pandas as pd
 import json
+import re
+import io
 from datetime import datetime
 import os
 
@@ -15,7 +18,7 @@ HTML_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PDF a JSON - Extractor</title>
+    <title>Extractor Historia Laboral - PDF a Excel</title>
     <style>
         * {
             margin: 0;
@@ -196,32 +199,6 @@ HTML_TEMPLATE = '''
             display: none;
         }
 
-        .preview {
-            margin-top: 20px;
-            padding: 16px;
-            background-color: #f5f5f7;
-            border-radius: 8px;
-            display: none;
-            max-height: 300px;
-            overflow-y: auto;
-        }
-
-        .preview h3 {
-            font-size: 16px;
-            margin-bottom: 10px;
-            color: #1d1d1f;
-        }
-
-        .preview pre {
-            background-color: white;
-            padding: 12px;
-            border-radius: 6px;
-            font-size: 12px;
-            overflow-x: auto;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-        }
-
         .stats {
             display: flex;
             gap: 20px;
@@ -249,12 +226,32 @@ HTML_TEMPLATE = '''
             color: #86868b;
             margin-top: 4px;
         }
+
+        .results {
+            margin-top: 20px;
+            padding: 16px;
+            background-color: #f5f5f7;
+            border-radius: 8px;
+            display: none;
+        }
+
+        .results h3 {
+            font-size: 18px;
+            margin-bottom: 12px;
+            color: #1d1d1f;
+        }
+
+        .results-details {
+            font-size: 14px;
+            line-height: 1.6;
+            color: #333;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>PDF a JSON Extractor</h1>
-        <p class="subtitle">Convierta cualquier PDF a JSON estructurado para procesar los datos como desee</p>
+        <h1>Extractor Historia Laboral</h1>
+        <p class="subtitle">Suba su PDF para extraer datos de historia laboral y exportar a Excel</p>
         
         <div class="upload-area" id="uploadArea">
             <svg class="upload-icon" viewBox="0 0 24 24">
@@ -269,34 +266,35 @@ HTML_TEMPLATE = '''
 
         <div class="loading" id="loading">
             <div class="spinner"></div>
-            <p style="margin-top: 16px; color: #86868b;">Extrayendo contenido del PDF...</p>
+            <p style="margin-top: 16px; color: #86868b;">Procesando PDF y extrayendo datos...</p>
         </div>
 
         <div class="message" id="message"></div>
 
-        <div class="stats" id="stats" style="display: none;">
-            <div class="stat-item">
-                <div class="stat-value" id="pageCount">0</div>
-                <div class="stat-label">Páginas</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value" id="tableCount">0</div>
-                <div class="stat-label">Tablas</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value" id="charCount">0</div>
-                <div class="stat-label">Caracteres</div>
-            </div>
+        <div class="results" id="results">
+            <h3>Resultados de la extracción</h3>
+            <div class="results-details" id="resultsDetails"></div>
         </div>
 
-        <div class="preview" id="preview">
-            <h3>Vista previa del JSON (primeras páginas)</h3>
-            <pre id="previewContent"></pre>
+        <div class="stats" id="stats" style="display: none;">
+            <div class="stat-item">
+                <div class="stat-value" id="recordCount">0</div>
+                <div class="stat-label">Registros</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="yearRange">-</div>
+                <div class="stat-label">Período</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="avgSalary">$0</div>
+                <div class="stat-label">Salario Promedio</div>
+            </div>
         </div>
 
         <div class="download-buttons" id="downloadButtons">
-            <button class="button success" id="downloadJson">Descargar JSON Completo</button>
-            <button class="button secondary" id="downloadCompact">Descargar JSON Compacto</button>
+            <button class="button success" id="downloadExcel">Descargar Excel</button>
+            <button class="button secondary" id="downloadCsv">Descargar CSV</button>
+            <button class="button" id="downloadJson">Descargar JSON</button>
         </div>
     </div>
 
@@ -307,11 +305,12 @@ HTML_TEMPLATE = '''
         const message = document.getElementById('message');
         const downloadButtons = document.getElementById('downloadButtons');
         const fileInfo = document.getElementById('fileInfo');
-        const preview = document.getElementById('preview');
-        const previewContent = document.getElementById('previewContent');
+        const results = document.getElementById('results');
+        const resultsDetails = document.getElementById('resultsDetails');
         const stats = document.getElementById('stats');
+        const downloadExcel = document.getElementById('downloadExcel');
+        const downloadCsv = document.getElementById('downloadCsv');
         const downloadJson = document.getElementById('downloadJson');
-        const downloadCompact = document.getElementById('downloadCompact');
 
         let extractedData = null;
 
@@ -376,11 +375,11 @@ HTML_TEMPLATE = '''
             loading.style.display = 'block';
             message.style.display = 'none';
             downloadButtons.style.display = 'none';
-            preview.style.display = 'none';
+            results.style.display = 'none';
             stats.style.display = 'none';
 
             try {
-                const response = await fetch('/extract', {
+                const response = await fetch('/process', {
                     method: 'POST',
                     body: formData
                 });
@@ -392,19 +391,14 @@ HTML_TEMPLATE = '''
                     showMessage('PDF procesado exitosamente', 'success');
                     
                     // Mostrar estadísticas
-                    document.getElementById('pageCount').textContent = result.data.total_pages;
-                    document.getElementById('tableCount').textContent = result.data.total_tables;
-                    document.getElementById('charCount').textContent = result.data.total_characters.toLocaleString();
+                    document.getElementById('recordCount').textContent = result.summary.total_records;
+                    document.getElementById('yearRange').textContent = result.summary.year_range;
+                    document.getElementById('avgSalary').textContent = '$' + result.summary.avg_salary.toLocaleString();
                     stats.style.display = 'flex';
                     
-                    // Mostrar vista previa
-                    const previewData = {
-                        total_pages: result.data.total_pages,
-                        total_tables: result.data.total_tables,
-                        first_page: result.data.pages[0]
-                    };
-                    previewContent.textContent = JSON.stringify(previewData, null, 2);
-                    preview.style.display = 'block';
+                    // Mostrar detalles
+                    resultsDetails.innerHTML = result.summary.details;
+                    results.style.display = 'block';
                     
                     downloadButtons.style.display = 'block';
                 } else {
@@ -424,7 +418,61 @@ HTML_TEMPLATE = '''
             message.style.display = 'block';
         }
 
-        // Download full JSON
+        // Download Excel
+        downloadExcel.addEventListener('click', async () => {
+            if (!extractedData) return;
+
+            try {
+                const response = await fetch('/download/excel', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ data: extractedData })
+                });
+
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'historia_laboral.xlsx';
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                }
+            } catch (error) {
+                showMessage('Error al descargar el archivo Excel', 'error');
+                console.error('Error:', error);
+            }
+        });
+
+        // Download CSV
+        downloadCsv.addEventListener('click', () => {
+            if (!extractedData) return;
+
+            // Convertir a CSV
+            const headers = ['año', 'mes', 'salario'];
+            const csvContent = [
+                headers.join(','),
+                ...extractedData.map(row => 
+                    [row.año, row.mes, row.salario].join(',')
+                )
+            ].join('\\n');
+
+            const blob = new Blob([csvContent], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'historia_laboral.csv';
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+        });
+
+        // Download JSON
         downloadJson.addEventListener('click', () => {
             if (!extractedData) return;
 
@@ -433,23 +481,7 @@ HTML_TEMPLATE = '''
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'pdf_completo.json';
-            document.body.appendChild(a);
-            a.click();
-            window.URL.revokeObjectURL(url);
-            document.body.removeChild(a);
-        });
-
-        // Download compact JSON (sin espacios)
-        downloadCompact.addEventListener('click', () => {
-            if (!extractedData) return;
-
-            const jsonStr = JSON.stringify(extractedData);
-            const blob = new Blob([jsonStr], { type: 'application/json' });
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'pdf_compacto.json';
+            a.download = 'historia_laboral.json';
             document.body.appendChild(a);
             a.click();
             window.URL.revokeObjectURL(url);
@@ -464,83 +496,142 @@ HTML_TEMPLATE = '''
 def index():
     return render_template_string(HTML_TEMPLATE)
 
-def extract_pdf_content(pdf_path):
-    """
-    Extrae TODO el contenido del PDF y lo estructura en JSON
-    """
-    data = {
-        'filename': os.path.basename(pdf_path),
-        'extraction_date': datetime.now().isoformat(),
-        'total_pages': 0,
-        'total_tables': 0,
-        'total_characters': 0,
-        'pages': []
-    }
+def extract_labor_history_data(pdf_path):
+    """Extrae todos los datos de historia laboral del PDF"""
+    
+    all_records = []
     
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            data['total_pages'] = len(pdf.pages)
-            
-            # Extraer metadatos si están disponibles
-            if hasattr(pdf, 'metadata'):
-                data['metadata'] = {
-                    key: str(value) if value else None 
-                    for key, value in (pdf.metadata or {}).items()
-                }
-            
             # Procesar cada página
-            for page_num, page in enumerate(pdf.pages):
-                page_data = {
-                    'page_number': page_num + 1,
-                    'width': page.width,
-                    'height': page.height,
-                    'text': '',
-                    'tables': [],
-                    'text_lines': []
-                }
+            for page in pdf.pages:
+                # Buscar en tablas
+                for table in page.tables:
+                    if not table or not table['data']:
+                        continue
+                    
+                    # Buscar índices de columnas
+                    periodo_idx = None
+                    salario_idx = None
+                    
+                    for i, header in enumerate(table['headers']):
+                        if header:
+                            header_str = str(header).lower()
+                            if 'periodo' in header_str or 'período' in header_str:
+                                periodo_idx = i
+                            elif 'salario' in header_str or 'cotizaci' in header_str or 'base' in header_str:
+                                salario_idx = i
+                    
+                    if periodo_idx is not None and salario_idx is not None:
+                        # Procesar filas
+                        for row in table['data']:
+                            if len(row) > max(periodo_idx, salario_idx):
+                                # Verificar si los datos están en una celda con saltos de línea
+                                periodo_cell = str(row[periodo_idx]) if row[periodo_idx] else ""
+                                salario_cell = str(row[salario_idx]) if row[salario_idx] else ""
+                                
+                                if '\n' in periodo_cell or '\n' in salario_cell:
+                                    # Datos con saltos de línea
+                                    periodos = periodo_cell.split('\n')
+                                    salarios = salario_cell.split('\n')
+                                    
+                                    for i in range(min(len(periodos), len(salarios))):
+                                        record = process_record(periodos[i].strip(), salarios[i].strip())
+                                        if record:
+                                            all_records.append(record)
+                                else:
+                                    # Una fila por registro
+                                    record = process_record(periodo_cell.strip(), salario_cell.strip())
+                                    if record:
+                                        all_records.append(record)
                 
-                # Extraer texto completo
+                # También buscar en el texto
                 text = page.extract_text()
                 if text:
-                    page_data['text'] = text
-                    page_data['text_lines'] = text.split('\n')
-                    data['total_characters'] += len(text)
-                
-                # Extraer todas las tablas
-                tables = page.extract_tables()
-                if tables:
-                    for table_idx, table in enumerate(tables):
-                        if table and len(table) > 0:
-                            # Convertir tabla a estructura más útil
-                            table_data = {
-                                'table_index': table_idx,
-                                'rows': len(table),
-                                'columns': len(table[0]) if table[0] else 0,
-                                'headers': table[0] if len(table) > 0 else [],
-                                'data': table[1:] if len(table) > 1 else [],
-                                'raw_data': table
-                            }
-                            page_data['tables'].append(table_data)
-                            data['total_tables'] += 1
-                
-                # Extraer información adicional si está disponible
-                try:
-                    # Intentar extraer palabras con sus posiciones
-                    words = page.extract_words()
-                    if words and len(words) < 1000:  # Limitar para no sobrecargar
-                        page_data['words_sample'] = words[:100]  # Primeras 100 palabras
-                except:
-                    pass
-                
-                data['pages'].append(page_data)
+                    # Buscar patrones de período y salario
+                    lines = text.split('\n')
+                    for line in lines:
+                        match = re.search(r'(\d{6})\s+.*?\$\s*([\d,\.]+)', line)
+                        if match:
+                            record = process_record(match.group(1), '$' + match.group(2))
+                            if record:
+                                all_records.append(record)
         
-        return data, None
+        # Eliminar duplicados
+        unique_records = []
+        seen_periods = set()
+        for record in all_records:
+            if record['periodo'] not in seen_periods:
+                seen_periods.add(record['periodo'])
+                unique_records.append(record)
+        
+        # Ordenar por período
+        unique_records.sort(key=lambda x: x['periodo'])
+        
+        return unique_records, None
     
     except Exception as e:
         return None, str(e)
 
-@app.route('/extract', methods=['POST'])
-def extract_pdf():
+def process_record(periodo, salario):
+    """Procesa un registro individual"""
+    try:
+        # Validar período
+        if not re.match(r'^\d{6}$', periodo):
+            return None
+        
+        año = int(periodo[:4])
+        mes = int(periodo[4:6])
+        
+        # Validar año y mes
+        if año < 1990 or año > 2030 or mes < 1 or mes > 12:
+            return None
+        
+        # Limpiar salario
+        salario_limpio = re.sub(r'[^\d]', '', salario)
+        if salario_limpio:
+            # Asumir que los últimos 2 dígitos son decimales
+            if len(salario_limpio) > 2:
+                salario_num = int(salario_limpio[:-2])
+            else:
+                salario_num = int(salario_limpio)
+            
+            # Validar salario
+            if salario_num > 100000 and salario_num < 100000000:
+                return {
+                    'periodo': periodo,
+                    'año': año,
+                    'mes': mes,
+                    'salario': salario_num
+                }
+    except:
+        pass
+    
+    return None
+
+def create_excel(data):
+    """Crea un archivo Excel con los datos procesados"""
+    df = pd.DataFrame(data)
+    df = df[['año', 'mes', 'salario']]  # Solo estas columnas
+    
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Historia Laboral')
+        
+        worksheet = writer.sheets['Historia Laboral']
+        worksheet.column_dimensions['A'].width = 10
+        worksheet.column_dimensions['B'].width = 10
+        worksheet.column_dimensions['C'].width = 15
+        
+        for cell in worksheet[1]:
+            cell.font = cell.font.copy(bold=True)
+    
+    output.seek(0)
+    return output
+
+@app.route('/process', methods=['POST'])
+def process_pdf():
     if 'pdf' not in request.files:
         return jsonify({'success': False, 'error': 'No se encontró el archivo PDF'}), 400
     
@@ -556,25 +647,70 @@ def extract_pdf():
         temp_path = 'temp_' + str(datetime.now().timestamp()) + '.pdf'
         file.save(temp_path)
         
-        data, error = extract_pdf_content(temp_path)
+        # Extraer datos
+        data, error = extract_labor_history_data(temp_path)
         
         os.remove(temp_path)
         
         if error:
             return jsonify({'success': False, 'error': 'Error al procesar el PDF: ' + error}), 500
         
+        if not data:
+            return jsonify({
+                'success': False, 
+                'error': 'No se encontraron datos de historia laboral en el PDF'
+            }), 404
+        
+        # Calcular resumen
+        df = pd.DataFrame(data)
+        summary = {
+            'total_records': len(data),
+            'year_range': f"{data[0]['año']}-{data[-1]['año']}",
+            'avg_salary': int(df['salario'].mean()),
+            'min_salary': int(df['salario'].min()),
+            'max_salary': int(df['salario'].max()),
+            'details': f"""
+                <strong>Período completo:</strong> {data[0]['periodo']} - {data[-1]['periodo']}<br>
+                <strong>Total de meses:</strong> {len(data)}<br>
+                <strong>Salario mínimo:</strong> ${df['salario'].min():,}<br>
+                <strong>Salario máximo:</strong> ${df['salario'].max():,}<br>
+                <strong>Páginas procesadas:</strong> Todas
+            """
+        }
+        
         return jsonify({
             'success': True,
             'data': data,
-            'message': 'PDF extraído exitosamente'
+            'summary': summary,
+            'message': 'PDF procesado exitosamente'
         })
     
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/download/excel', methods=['POST'])
+def download_excel():
+    try:
+        data = request.json.get('data', [])
+        
+        if not data:
+            return jsonify({'error': 'No hay datos para exportar'}), 400
+        
+        excel_buffer = create_excel(data)
+        
+        return send_file(
+            excel_buffer,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name='historia_laboral.xlsx'
+        )
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'ok', 'message': 'PDF to JSON Extractor is running'})
+    return jsonify({'status': 'ok', 'message': 'Historia Laboral Extractor is running'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
